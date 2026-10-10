@@ -1,74 +1,102 @@
-/**
- * CarePlus Clinic - Server Configuration
- * Loads environment variables and provides sanitized configuration state.
- * Never exposes secrets to frontend or logs.
- */
-
 import dotenv from 'dotenv';
 dotenv.config();
 
 export interface ServerConfig {
   port: number;
+  nodeEnv: string;
   appUrl: string;
-  geminiApiKey: string | undefined;
   google: {
-    clientId: string | undefined;
-    clientSecret: string | undefined;
+    clientId?: string;
+    clientSecret?: string;
     redirectUri: string;
-    refreshToken: string | undefined;
-    calendarId: string;
-    spreadsheetId: string | undefined;
-    clinicNotificationEmail: string | undefined;
-    isOAuthConfigured: boolean;
+    refreshToken?: string;
+    calendarId?: string;
+    spreadsheetId?: string;
+    clinicEmail?: string;
+  };
+  gemini: {
+    apiKey?: string;
   };
 }
 
-const PORT = parseInt(process.env.PORT || '3000', 10);
-const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+/**
+ * Determine the base application URL with intelligent environment detection:
+ * 1. APP_URL if explicitly specified.
+ * 2. VERCEL_PROJECT_PRODUCTION_URL (native Vercel production system env).
+ * 3. VERCEL_URL (native Vercel preview/deployment system env).
+ * 4. Fall back to local development URL.
+ * Trailing slashes are cleanly removed.
+ */
+function resolveAppUrl(port: number): string {
+  let url = '';
+  if (process.env.APP_URL && process.env.APP_URL.trim() !== '') {
+    url = process.env.APP_URL.trim();
+  } else if (process.env.VERCEL_PROJECT_PRODUCTION_URL && process.env.VERCEL_PROJECT_PRODUCTION_URL.trim() !== '') {
+    const raw = process.env.VERCEL_PROJECT_PRODUCTION_URL.trim();
+    url = raw.startsWith('http') ? raw : `https://${raw}`;
+  } else if (process.env.VERCEL_URL && process.env.VERCEL_URL.trim() !== '') {
+    const raw = process.env.VERCEL_URL.trim();
+    url = raw.startsWith('http') ? raw : `https://${raw}`;
+  } else {
+    url = `http://localhost:${port}`;
+  }
 
-// Compute default redirect URI if not explicitly provided
-const DEFAULT_REDIRECT_URI = `${APP_URL.replace(/\/$/, '')}/api/auth/google/callback`;
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || DEFAULT_REDIRECT_URI;
+  // Remove any trailing slash for consistent endpoint resolution
+  return url.replace(/\/+$/, '');
+}
+
+const parsedPort = parseInt(process.env.PORT || '3000', 10);
+const effectivePort = Number.isNaN(parsedPort) ? 3000 : parsedPort;
+const effectiveAppUrl = resolveAppUrl(effectivePort);
 
 export const config: ServerConfig = {
-  port: PORT,
-  appUrl: APP_URL,
-  geminiApiKey: process.env.GEMINI_API_KEY,
+  port: effectivePort,
+  nodeEnv: process.env.NODE_ENV || 'development',
+  appUrl: effectiveAppUrl,
   google: {
     clientId: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    redirectUri: GOOGLE_REDIRECT_URI,
+    redirectUri: process.env.GOOGLE_REDIRECT_URI || `${effectiveAppUrl}/api/auth/google/callback`,
     refreshToken: process.env.GOOGLE_REFRESH_TOKEN,
     calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
     spreadsheetId: process.env.GOOGLE_SPREADSHEET_ID,
-    clinicNotificationEmail: process.env.CLINIC_NOTIFICATION_EMAIL,
-    isOAuthConfigured: Boolean(
-      process.env.GOOGLE_CLIENT_ID && 
-      process.env.GOOGLE_CLIENT_SECRET &&
-      !process.env.GOOGLE_CLIENT_ID.includes('YOUR_GOOGLE_CLIENT_ID')
-    ),
+    clinicEmail: process.env.CLINIC_NOTIFICATION_EMAIL,
+  },
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY,
   },
 };
 
 /**
- * Returns a sanitized diagnostic overview safe to share with client or dashboard.
- * Zero secrets or tokens are returned.
+ * Diagnostic overview without exposing client secrets or access tokens.
+ * Safe to return from public/admin health check endpoints.
  */
 export function getSanitizedConfigStatus() {
+  const isGoogleOAuthConfigured = Boolean(
+    config.google.clientId &&
+    config.google.clientSecret
+  );
+
+  const isGoogleConnected = Boolean(
+    isGoogleOAuthConfigured &&
+    config.google.refreshToken
+  );
+
   return {
-    environment: process.env.NODE_ENV || 'development',
+    environment: config.nodeEnv,
     appUrl: config.appUrl,
-    redirectUri: config.google.redirectUri,
-    googleOAuth: {
-      configured: config.google.isOAuthConfigured,
-      hasClientId: Boolean(config.google.clientId && !config.google.clientId.includes('YOUR_GOOGLE_CLIENT_ID')),
-      hasClientSecret: Boolean(config.google.clientSecret && !config.google.clientSecret.includes('YOUR_GOOGLE_CLIENT_SECRET')),
-      hasSpreadsheetId: Boolean(config.google.spreadsheetId && !config.google.spreadsheetId.includes('YOUR_GOOGLE_SPREADSHEET_ID')),
-      calendarId: config.google.calendarId,
-      hasNotificationEmail: Boolean(config.google.clinicNotificationEmail),
-    },
-    aiAssistant: {
-      hasGeminiApiKey: Boolean(config.geminiApiKey && !config.geminiApiKey.includes('MY_GEMINI_API_KEY')),
+    integrations: {
+      googleOAuth: {
+        configured: isGoogleOAuthConfigured,
+        connected: isGoogleConnected,
+        redirectUri: config.google.redirectUri,
+        hasCalendarId: Boolean(config.google.calendarId),
+        hasSpreadsheetId: Boolean(config.google.spreadsheetId),
+        hasClinicEmail: Boolean(config.google.clinicEmail),
+      },
+      gemini: {
+        configured: Boolean(config.gemini.apiKey),
+      },
     },
   };
 }
