@@ -1,0 +1,6 @@
+{
+  "name": "CarePlus Clinic — Smart Appointment System",
+  "description": "A high-converting clinic appointment automation system demonstrating instant AI inquiries, lead capture, qualification, scheduling, and CRM workflows for healthcare practices.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
