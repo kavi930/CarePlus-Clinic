@@ -26,21 +26,103 @@ interface StoredTokens {
   user_email?: string | null;
 }
 
-// In-memory token store for the server instance
+/**
+ * TEMPORARY RUNTIME TOKEN STORAGE (NOTICE):
+ * `storedTokens` is an in-memory variable scoped only to the currently executing
+ * serverless or Node.js process instance.
+ *
+ * In serverless environments like Vercel:
+ * - Each request may execute in an isolated container or instance.
+ * - In-memory state is wiped whenever an instance recycles or goes cold.
+ * - This in-memory store is temporary and unsuitable for persistent multi-user production.
+ *
+ * For resilient production usage across serverless invocations:
+ * 1. Pre-configure GOOGLE_REFRESH_TOKEN in your environment variables (supported below), OR
+ * 2. Persist tokens into an encrypted database or secure key-value store (e.g., Firestore, PostgreSQL).
+ */
 let storedTokens: StoredTokens | null = null;
 
-// Track active OAuth state tokens with 10-minute expiry to protect against CSRF attacks
-const pendingStates = new Map<string, { createdAt: number; redirectUrl?: string }>();
-
-// Clean up expired state tokens periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [state, data] of pendingStates.entries()) {
-    if (now - data.createdAt > 10 * 60 * 1000) {
-      pendingStates.delete(state);
-    }
+/**
+ * Resolves the server-side signing secret for OAuth state tokens.
+ * Strictly uses OAUTH_STATE_SECRET or GOOGLE_CLIENT_SECRET from server environment variables.
+ * Never exposes or falls back to public or client-side keys.
+ */
+function getStateSecret(): string {
+  const secret = process.env.OAUTH_STATE_SECRET || config.google.clientSecret || process.env.SESSION_SECRET;
+  if (!secret) {
+    throw new Error('Server configuration error: OAUTH_STATE_SECRET or GOOGLE_CLIENT_SECRET must be set for secure OAuth state signing.');
   }
-}, 5 * 60 * 1000);
+  return secret;
+}
+
+/**
+ * Generates an HMAC-SHA256 signed, expiring OAuth state token.
+ * Contains a cryptographic nonce, a timestamp (10-minute expiry), and the safe return path.
+ * Because it is self-verifying and stateless, it functions reliably across Vercel serverless
+ * function cold starts, instances, and server restarts without requiring a shared in-memory Map.
+ */
+function createSignedState(returnPath: string): string {
+  const secret = getStateSecret();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const createdAt = Date.now();
+  const safePath = encodeURIComponent(returnPath);
+  const payload = `${nonce}:${createdAt}:${safePath}`;
+  const signature = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  return Buffer.from(`${payload}:${signature}`).toString('base64url');
+}
+
+/**
+ * Safely validates an HMAC-signed OAuth state token.
+ * - Verifies payload structure (nonce, timestamp, path, signature)
+ * - Compares buffer lengths safely before invoking crypto.timingSafeEqual to prevent errors
+ * - Enforces a strict 10-minute expiration window to protect against CSRF attacks
+ */
+function verifySignedState(stateToken: string): { createdAt: number; redirectUrl: string } | null {
+  if (!stateToken || typeof stateToken !== 'string') {
+    return null;
+  }
+
+  try {
+    const secret = getStateSecret();
+    const decoded = Buffer.from(stateToken, 'base64url').toString('utf8');
+    const parts = decoded.split(':');
+    if (parts.length !== 4) return null;
+
+    const [nonce, createdAtStr, safePath, receivedSig] = parts;
+    if (!nonce || !createdAtStr || !safePath || !receivedSig) {
+      return null;
+    }
+
+    const payload = `${nonce}:${createdAtStr}:${safePath}`;
+    const expectedSig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+
+    const receivedBuf = Buffer.from(receivedSig, 'hex');
+    const expectedBuf = Buffer.from(expectedSig, 'hex');
+
+    // Prevent throwing RangeError: timingSafeEqual requires buffers of identical length
+    if (receivedBuf.length === 0 || receivedBuf.length !== expectedBuf.length) {
+      return null;
+    }
+
+    if (!crypto.timingSafeEqual(receivedBuf, expectedBuf)) {
+      return null;
+    }
+
+    const createdAt = parseInt(createdAtStr, 10);
+    const tenMinutesMs = 10 * 60 * 1000;
+    if (isNaN(createdAt) || Date.now() - createdAt > tenMinutesMs || createdAt > Date.now() + 60 * 1000) {
+      return null; // Expired or future timestamp
+    }
+
+    const decodedPath = decodeURIComponent(safePath);
+    return {
+      createdAt,
+      redirectUrl: decodedPath || '/admin#settings',
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Initializes and returns a Google OAuth2 client with server credentials.
@@ -65,7 +147,7 @@ export function getAuthenticatedClient() {
   const client = createOAuth2Client();
   if (!client) return null;
 
-  // Use stored tokens if available
+  // Use stored in-memory tokens if available in this process instance
   if (storedTokens && (storedTokens.access_token || storedTokens.refresh_token)) {
     client.setCredentials({
       access_token: storedTokens.access_token || undefined,
@@ -87,7 +169,7 @@ export function getAuthenticatedClient() {
 }
 
 /**
- * Generates an authorization URL with a secure cryptographic state parameter.
+ * Generates an authorization URL with a secure cryptographic stateless HMAC state parameter.
  */
 export function generateAuthUrl(returnPath = '/admin#settings') {
   const client = createOAuth2Client();
@@ -95,11 +177,10 @@ export function generateAuthUrl(returnPath = '/admin#settings') {
     throw new Error('Google OAuth is not configured. Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET.');
   }
 
-  const state = crypto.randomBytes(24).toString('hex');
-  pendingStates.set(state, { createdAt: Date.now(), redirectUrl: returnPath });
+  const state = createSignedState(returnPath);
 
   const url = client.generateAuthUrl({
-    access_type: 'offline', // Requests refresh_token for persistent background execution
+    access_type: 'offline', // Requests refresh_token for background execution
     scope: REQUIRED_SCOPES,
     include_granted_scopes: true,
     prompt: 'consent', // Ensures refresh_token is returned on consent
@@ -110,14 +191,14 @@ export function generateAuthUrl(returnPath = '/admin#settings') {
 }
 
 /**
- * Exchanges the authorization code for tokens, validates state, and retrieves user profile email.
+ * Exchanges the authorization code for tokens, validates state statelessly, and retrieves user profile email.
  */
 export async function handleOAuthCallback(code: string, state: string) {
-  const stateRecord = pendingStates.get(state);
+  // Statistically and cryptographically validate the signed state token across serverless instances
+  const stateRecord = verifySignedState(state);
   if (!stateRecord) {
     throw new Error('Invalid or expired OAuth state parameter. Please retry the authorization flow.');
   }
-  pendingStates.delete(state);
 
   const client = createOAuth2Client();
   if (!client) {
