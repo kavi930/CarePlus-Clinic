@@ -79,19 +79,40 @@ apiRouter.post('/auth/google/disconnect', async (req: Request, res: Response) =>
   }
 });
 
-// 5. Check Slot Availability
-apiRouter.post('/appointments/check-availability', async (req: Request, res: Response) => {
+// 5. Check Slot Availability (Supports GET & POST on /calendar/availability and /appointments/check-availability)
+const handleCheckAvailability = async (req: Request, res: Response) => {
   try {
-    const { date, timeSlots } = req.body;
-    if (!date) {
-      return res.status(400).json({ ok: false, error: 'Target date is required.' });
+    const dateParam = (req.method === 'GET' ? req.query.date : req.body?.date) as string | undefined;
+    const targetDate = dateParam || new Date().toISOString().split('T')[0];
+
+    let timeSlots: string[] | undefined;
+    if (req.method === 'GET') {
+      if (typeof req.query.timeSlots === 'string') {
+        timeSlots = req.query.timeSlots.split(',').map((s) => s.trim()).filter(Boolean);
+      } else if (Array.isArray(req.query.timeSlots)) {
+        timeSlots = req.query.timeSlots as string[];
+      }
+    } else {
+      timeSlots = req.body?.timeSlots;
     }
-    const availability = await checkCalendarAvailability(date, timeSlots);
-    res.json({ ok: true, ...availability });
+
+    const availability = await checkCalendarAvailability(targetDate, timeSlots);
+    res.json({
+      ok: true,
+      date: targetDate,
+      ...availability,
+    });
   } catch (error: any) {
     res.status(500).json({ ok: false, error: error.message });
   }
-});
+};
+
+apiRouter.get('/calendar/availability', handleCheckAvailability);
+apiRouter.post('/calendar/availability', handleCheckAvailability);
+apiRouter.get('/appointments/check-availability', handleCheckAvailability);
+apiRouter.post('/appointments/check-availability', handleCheckAvailability);
+apiRouter.get('/appointments/availability', handleCheckAvailability);
+apiRouter.post('/appointments/availability', handleCheckAvailability);
 
 // 6. Safe Transactional Appointment Booking
 apiRouter.post('/appointments/book', async (req: Request, res: Response) => {
