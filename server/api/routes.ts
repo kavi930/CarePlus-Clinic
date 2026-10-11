@@ -35,16 +35,22 @@ apiRouter.get('/status', (req: Request, res: Response) => {
   });
 });
 
-// 2. Google OAuth Initiation
+
+ // 2. Google OAuth Initiation
 apiRouter.get('/auth/google/url', (req: Request, res: Response) => {
   try {
     const returnPath = (req.query.returnPath as string) || '/admin#settings';
-    const { url, state } = generateAuthUrl(returnPath);
-    res.json({ ok: true, url, state });
+    const { url } = generateAuthUrl(returnPath);
+    res.redirect(302, url);
   } catch (error: any) {
-    res.status(400).json({ ok: false, error: error.message });
+    console.error('Google OAuth initiation failed:', error?.message || error);
+    res.status(400).json({
+      ok: false,
+      error: 'Unable to start Google authorization. Check the server configuration.',
+    });
   }
 });
+
 
 // 3. Google OAuth Callback
 apiRouter.get('/auth/google/callback', async (req: Request, res: Response) => {
