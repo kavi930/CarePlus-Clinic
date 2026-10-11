@@ -128,9 +128,9 @@ function verifySignedState(stateToken: string): { createdAt: number; redirectUrl
  * Initializes and returns a Google OAuth2 client with server credentials.
  */
 export function createOAuth2Client(customRedirectUri?: string) {
-  if (!config.google.isOAuthConfigured) {
-    return null;
-  }
+if (!config.google.clientId || !config.google.clientSecret) {
+  return null;
+}
 
   const redirectUri = customRedirectUri || config.google.redirectUri;
   return new google.auth.OAuth2(
